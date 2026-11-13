@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 import json
-import time
 import base64
 import asyncio
 import hashlib
@@ -31,9 +30,6 @@ _FALLBACK_IMAGE_DATA = (
     "%3Cpath d='M16 68c4-16 44-16 48 0' fill='%2360a5fa'/%3E%3C/svg%3E"
 )
 _DEVICE_SCALE_FACTORS = {"normal": 1.0, "high": 1.3, "ultra": 1.8}
-_BROWSER_IDLE_SECONDS = 120.0
-_BROWSER_REAP_INTERVAL_SECONDS = 30.0
-_BROWSER_MAX_USES = 200
 _PAGE_SETTLE_TIMEOUT_MS = 5000
 _BROWSER_LAUNCH_ARGS = [
     "--disable-gpu",
@@ -43,10 +39,7 @@ _BROWSER_LAUNCH_ARGS = [
 
 _playwright = None
 _browser = None
-_browser_uses = 0
-_browser_last_used = 0.0
 _browser_lock = asyncio.Lock()
-_browser_reaper: asyncio.Task | None = None
 
 
 def _is_inlineable_asset_url(url: str) -> bool:
@@ -233,22 +226,16 @@ def _playwright_options(options: dict | None) -> dict[str, object]:
 
 
 async def _close_playwright_browser() -> None:
-    global _playwright, _browser, _browser_uses
+    global _playwright, _browser
     if _browser is not None:
         await _browser.close()
         _browser = None
     if _playwright is not None:
         await _playwright.stop()
         _playwright = None
-    _browser_uses = 0
 
 
 async def _shutdown_playwright_browser() -> None:
-    global _browser_reaper
-    reaper = _browser_reaper
-    _browser_reaper = None
-    if reaper is not None and reaper is not asyncio.current_task() and not reaper.done():
-        reaper.cancel()
     await _close_playwright_browser()
 
 
@@ -259,43 +246,74 @@ async def shutdown_playwright_browser() -> None:
 
 
 async def _get_playwright_browser():
-    global _playwright, _browser, _browser_uses
+    global _playwright, _browser
     from playwright.async_api import async_playwright
 
     if _playwright is None:
         _playwright = await async_playwright().start()
-    if _browser is not None and (
-        not _browser.is_connected() or _browser_uses >= _BROWSER_MAX_USES
-    ):
-        if _browser.is_connected():
-            await _browser.close()
+    if _browser is not None and not _browser.is_connected():
         _browser = None
     if _browser is None:
-        _browser = await _playwright.chromium.launch(
-            headless=True,
-            args=_BROWSER_LAUNCH_ARGS,
+        _browser = await asyncio.wait_for(
+            _playwright.chromium.launch(
+                headless=True,
+                args=_BROWSER_LAUNCH_ARGS,
+            ),
+            timeout=30,
         )
-        _browser_uses = 0
-    _browser_uses += 1
     return _browser
 
 
-async def _reap_idle_playwright_browser() -> None:
-    global _browser_reaper
-    while True:
-        await asyncio.sleep(_BROWSER_REAP_INTERVAL_SECONDS)
-        async with _browser_lock:
-            if time.monotonic() - _browser_last_used < _BROWSER_IDLE_SECONDS:
-                continue
-            await _close_playwright_browser()
-        break
-    _browser_reaper = None
-
-
-def _ensure_playwright_reaper() -> None:
-    global _browser_reaper
-    if _browser_reaper is None or _browser_reaper.done():
-        _browser_reaper = asyncio.create_task(_reap_idle_playwright_browser())
+async def _render_page(
+    browser,
+    html: str,
+    settings: dict[str, object],
+) -> bytes:
+    viewport = {
+        "width": int(settings["viewport_width"]),
+        "height": int(settings["viewport_height"]),
+    }
+    timeout_ms = int(float(settings["timeout"]) * 1000)
+    image_format = str(settings["image_format"])
+    quality = int(settings["quality"])
+    page = await browser.new_page(
+        viewport=viewport,
+        device_scale_factor=float(settings["device_scale_factor"]),
+    )
+    try:
+        page.set_default_timeout(timeout_ms)
+        page.set_default_navigation_timeout(timeout_ms)
+        await page.set_content(html, wait_until="load", timeout=timeout_ms)
+        try:
+            await page.wait_for_function(
+                """async () => {
+                    await document.fonts.ready;
+                    const images = Array.from(document.images);
+                    await Promise.all(images.map((image) => {
+                        if (image.complete) return undefined;
+                        return new Promise((resolve) => {
+                            image.addEventListener('load', resolve, { once: true });
+                            image.addEventListener('error', resolve, { once: true });
+                            setTimeout(resolve, 3000);
+                        });
+                    }));
+                    await new Promise((resolve) =>
+                        requestAnimationFrame(() => requestAnimationFrame(resolve))
+                    );
+                    return true;
+                }""",
+                timeout=min(timeout_ms, _PAGE_SETTLE_TIMEOUT_MS),
+            )
+        except Exception:
+            pass
+        payload = await page.screenshot(
+            type=image_format,
+            full_page=bool(settings["full_page"]),
+            quality=quality if image_format == "jpeg" else None,
+        )
+    finally:
+        await page.close()
+    return bytes(payload)
 
 
 async def render_html_with_playwright(
@@ -313,60 +331,21 @@ async def render_html_with_playwright(
 
     settings = _playwright_options(options)
     timeout = float(settings["timeout"])
-    timeout_ms = int(timeout * 1000)
-    viewport = {
-        "width": int(settings["viewport_width"]),
-        "height": int(settings["viewport_height"]),
-    }
-    image_format = str(settings["image_format"])
-    quality = int(settings["quality"])
-    full_page = bool(settings["full_page"])
-    _ensure_playwright_reaper()
 
-    global _browser_last_used
     async with _browser_lock:
-        _browser_last_used = time.monotonic()
         browser = await _get_playwright_browser()
-        page = await browser.new_page(
-            viewport=viewport,
-            device_scale_factor=float(settings["device_scale_factor"]),
-        )
         try:
-            page.set_default_timeout(timeout_ms)
-            page.set_default_navigation_timeout(timeout_ms)
-            await page.set_content(html, wait_until="load", timeout=timeout_ms)
-            try:
-                await page.wait_for_function(
-                    """async () => {
-                        await document.fonts.ready;
-                        const images = Array.from(document.images);
-                        await Promise.all(images.map((image) => {
-                            if (image.complete) return undefined;
-                            return new Promise((resolve) => {
-                                image.addEventListener('load', resolve, { once: true });
-                                image.addEventListener('error', resolve, { once: true });
-                                setTimeout(resolve, 3000);
-                            });
-                        }));
-                        await new Promise((resolve) =>
-                            requestAnimationFrame(() => requestAnimationFrame(resolve))
-                        );
-                        return true;
-                    }""",
-                    timeout=min(timeout_ms, _PAGE_SETTLE_TIMEOUT_MS),
-                )
-            except PlaywrightTimeoutError:
-                pass
-            payload = await page.screenshot(
-                type=image_format,
-                full_page=full_page,
-                quality=quality if image_format == "jpeg" else None,
+            return await asyncio.wait_for(
+                _render_page(browser, html, settings),
+                timeout=timeout,
             )
         except (PlaywrightTimeoutError, TimeoutError) as exc:
+            await _close_playwright_browser()
             raise RuntimeError("Playwright 渲染超时") from exc
-        finally:
-            await page.close()
-    return bytes(payload)
+        except Exception:
+            if not browser.is_connected():
+                await _close_playwright_browser()
+            raise
 
 
 class _Provider:
