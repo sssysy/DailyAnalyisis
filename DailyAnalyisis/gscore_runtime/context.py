@@ -34,7 +34,7 @@ _DEVICE_SCALE_FACTORS = {"normal": 1.0, "high": 1.3, "ultra": 1.8}
 _BROWSER_IDLE_SECONDS = 120.0
 _BROWSER_REAP_INTERVAL_SECONDS = 30.0
 _BROWSER_MAX_USES = 200
-_PAGE_LOAD_WAIT_MS = 3000
+_PAGE_SETTLE_TIMEOUT_MS = 5000
 _BROWSER_LAUNCH_ARGS = [
     "--disable-gpu",
     "--disable-software-rasterizer",
@@ -336,10 +336,27 @@ async def render_html_with_playwright(
             page.set_default_navigation_timeout(timeout_ms)
             await page.set_content(html, wait_until="load", timeout=timeout_ms)
             try:
-                await page.evaluate("() => document.fonts.ready")
-            except Exception:
+                await page.wait_for_function(
+                    """async () => {
+                        await document.fonts.ready;
+                        const images = Array.from(document.images);
+                        await Promise.all(images.map((image) => {
+                            if (image.complete) return undefined;
+                            return new Promise((resolve) => {
+                                image.addEventListener('load', resolve, { once: true });
+                                image.addEventListener('error', resolve, { once: true });
+                                setTimeout(resolve, 3000);
+                            });
+                        }));
+                        await new Promise((resolve) =>
+                            requestAnimationFrame(() => requestAnimationFrame(resolve))
+                        );
+                        return true;
+                    }""",
+                    timeout=min(timeout_ms, _PAGE_SETTLE_TIMEOUT_MS),
+                )
+            except PlaywrightTimeoutError:
                 pass
-            await page.wait_for_timeout(_PAGE_LOAD_WAIT_MS)
             payload = await page.screenshot(
                 type=image_format,
                 full_page=full_page,
