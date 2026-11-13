@@ -15,12 +15,29 @@ from .config import PluginPaths, PluginConfig
 from .provider import LLMUsage, LLMResponse
 
 _SVG_OPEN_TAG_RE = re.compile(r"<svg\b[^>]*>", re.IGNORECASE)
+_SVG_BLOCK_RE = re.compile(r"<svg\b[^>]*>.*?</svg>", re.IGNORECASE | re.DOTALL)
+_SVG_TEXT_RE = re.compile(r"<text\b", re.IGNORECASE)
+_SVG_FLUID_RE = re.compile(r"""\swidth\s*=\s*['"]100%['"]""", re.IGNORECASE)
+_SVG_CLASS_RE = re.compile(r"""\bclass\s*=\s*(["'])([^"']*)\1""", re.IGNORECASE)
+_SMALL_ICON_MAX_PX = 64
 _DOODLE_CLASS_RE = re.compile(
     r'''\bclass\s*=\s*(["'])[^"']*\bdoodle\b[^"']*\1''',
     re.IGNORECASE,
 )
 _SVG_DIMENSION_RE = re.compile(
     r'''\s(?:width|height)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)''',
+    re.IGNORECASE,
+)
+_SVG_WIDTH_RE = re.compile(
+    r"""\swidth\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)""",
+    re.IGNORECASE,
+)
+_SVG_HEIGHT_RE = re.compile(
+    r"""\sheight\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)""",
+    re.IGNORECASE,
+)
+_SVG_PX_RE = re.compile(
+    r"""\s%s\s*=\s*['"]?(\d+(?:\.\d+)?)(?:px)?['"]?""",
     re.IGNORECASE,
 )
 _IMG_TAG_RE = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
@@ -40,32 +57,137 @@ _FALLBACK_IMAGE_DATA = (
 )
 
 
-def _protect_inline_icons(html: str) -> str:
-    def replace_tag(match: re.Match[str]) -> str:
-        tag = match.group(0)
-        if _DOODLE_CLASS_RE.search(tag) is None:
-            return tag
-        without_dimensions = _SVG_DIMENSION_RE.sub("", tag)
-        style_match = re.search(r'''\sstyle\s*=\s*(["'])(.*?)\1''', without_dimensions, re.IGNORECASE | re.DOTALL)
-        if style_match:
-            style = style_match.group(2).rstrip()
-            if not re.search(r"(?:^|;)\s*width\s*:", style, re.IGNORECASE):
-                separator = "" if not style or style.endswith(";") else ";"
-                style = f"{style}{separator}width:32px"
-            if not re.search(r"(?:^|;)\s*height\s*:", style, re.IGNORECASE):
-                separator = "" if not style or style.endswith(";") else ";"
-                style = f"{style}{separator}height:32px"
-            replacement = style
-            without_dimensions = (
-                without_dimensions[: style_match.start(2)]
-                + replacement
-                + without_dimensions[style_match.end(2) :]
-            )
-        else:
-            without_dimensions = without_dimensions[:-1] + ' style="width:32px;height:32px"'
-        return without_dimensions[:-1] + ' width="32" height="32">'
+def _px_dim(open_tag: str, name: str) -> float | None:
+    match = re.search(_SVG_PX_RE.pattern % name, open_tag, re.IGNORECASE)
+    if match is None:
+        return None
+    return float(match.group(1))
 
-    return _SVG_OPEN_TAG_RE.sub(replace_tag, html)
+
+def _with_skip_marker(open_tag: str) -> str:
+    """给非图表 SVG 加 ``width="100%"``，命中框架跳过分支。"""
+    width = _px_dim(open_tag, "width")
+    height = _px_dim(open_tag, "height")
+    if width == 0 or height == 0:
+        # 0 尺寸 sprite 只定义 symbol；保留 height="0" 让它不占位
+        body = _SVG_WIDTH_RE.sub("", open_tag)
+        if _SVG_FLUID_RE.search(open_tag):
+            return open_tag
+        return _mark_fluid(body)
+    body = _SVG_WIDTH_RE.sub("", open_tag)
+    body = _SVG_HEIGHT_RE.sub("", body)
+    style_match = re.search(r"""\sstyle\s*=\s*(["'])(.*?)\1""", body, re.IGNORECASE | re.DOTALL)
+    extra: list[str] = []
+    if width is not None:
+        extra.append(f"width:{width:g}px")
+    if height is not None:
+        extra.append(f"height:{height:g}px")
+    if style_match is not None:
+        style = _strip_svg_size_css(style_match.group(2))
+        if re.search(r"(?:^|;)\s*width\s*:", style_match.group(2), re.IGNORECASE):
+            extra = [item for item in extra if not item.startswith("width")]
+        if re.search(r"(?:^|;)\s*height\s*:", style_match.group(2), re.IGNORECASE):
+            extra = [item for item in extra if not item.startswith("height")]
+        if extra:
+            sep = "" if not style or style.rstrip().endswith(";") else ";"
+            merged = f"{style}{sep}{';'.join(extra)}"
+            body = body[: style_match.start(2)] + merged + body[style_match.end(2) :]
+    elif extra:
+        body = body[:-1] + f' style="{";".join(extra)}">'
+    return _mark_fluid(body)
+
+
+def _mark_fluid(open_tag: str) -> str:
+    """标记写进开标签前 160 字符内，避免框架正则窗口漏判。"""
+    return open_tag[:4] + ' width="100%"' + open_tag[4:]
+
+
+def _strip_svg_size_css(style: str) -> str:
+    """去掉样式里的 px 宽高；``width="100%"`` 已接管宽度，只留显式值。"""
+    parts = [part for part in style.split(";") if part.strip()]
+    kept = [part for part in parts if not re.match(r"\s*(?:width|height)\s*:", part, re.IGNORECASE)]
+    return ";".join(kept)
+
+
+def _has_css_size(html: str, open_tag: str, parent_classes: list[str]) -> bool:
+    """页面 CSS 里是否有规则给这个 SVG 或它的父级定尺寸。"""
+    names = list(parent_classes)
+    class_match = _SVG_CLASS_RE.search(open_tag)
+    if class_match is not None:
+        names.extend(class_match.group(2).split())
+    for name in names:
+        pattern = rf"\.{re.escape(name)}\b[^{{]*\{{[^}}]*?(?:width|height)\s*:"
+        if re.search(pattern, html, re.IGNORECASE):
+            return True
+        pattern_child = rf"\.{re.escape(name)}\s+svg\b[^{{]*\{{[^}}]*?(?:width|height)\s*:"
+        if re.search(pattern_child, html, re.IGNORECASE):
+            return True
+    return False
+
+
+def _is_small_icon(html: str, open_tag: str, parent_classes: list[str]) -> bool:
+    """小尺寸或由 CSS 定尺寸的 SVG 视为图标；大尺寸无文字的可能是图表。"""
+    width = _px_dim(open_tag, "width")
+    height = _px_dim(open_tag, "height")
+    if width is not None and height is not None:
+        return max(width, height) <= _SMALL_ICON_MAX_PX
+    if width == 0 or height == 0:
+        return True
+    return _has_css_size(html, open_tag, parent_classes)
+
+
+def _protect_inline_icons(html: str) -> str:
+    """图标与 sprite 加框架跳过标记；图表留给框架重写。"""
+
+    parent_classes = _parent_class_map(html)
+
+    def replace_block(match: re.Match[str]) -> str:
+        block = match.group(0)
+        end = block.find(">")
+        if end == -1:
+            return block
+        open_tag = block[: end + 1]
+        if _SVG_TEXT_RE.search(block) or _SVG_FLUID_RE.search(open_tag) or "data-gs-" in open_tag:
+            return block
+        parents = parent_classes.get(match.start(), [])
+        if not _is_small_icon(html, open_tag, parents):
+            return block
+        if _DOODLE_CLASS_RE.search(open_tag):
+            open_tag = _force_doodle_size(open_tag)
+        return _with_skip_marker(open_tag) + block[end + 1 :]
+
+    return _SVG_BLOCK_RE.sub(replace_block, html)
+
+
+def _parent_class_map(html: str) -> dict[int, list[str]]:
+    """记录每个位置最近的三层父级 class，用于识别 CSS 派生的图标尺寸。"""
+    out: dict[int, list[str]] = {}
+    stack: list[list[str]] = []
+    for tag in re.finditer(r"<(/?)([a-zA-Z][\w-]*)\b([^>]*)>", html):
+        closing = bool(tag.group(1))
+        if closing:
+            if stack:
+                stack.pop()
+            continue
+        out[tag.start()] = [item for level in stack[-3:] for item in level]
+        class_match = _SVG_CLASS_RE.search(tag.group(0))
+        stack.append(class_match.group(2).split() if class_match else [])
+    return out
+
+
+def _force_doodle_size(open_tag: str) -> str:
+    """``doodle`` 图标固定 32px；缺尺寸时补上。"""
+    without_dimensions = _SVG_DIMENSION_RE.sub("", open_tag)
+    style_match = re.search(r'''\sstyle\s*=\s*(["'])(.*?)\1''', without_dimensions, re.IGNORECASE | re.DOTALL)
+    if style_match is None:
+        return without_dimensions[:-1] + ' style="width:32px;height:32px" width="32" height="32">'
+    style = style_match.group(2).rstrip()
+    for name in ("width", "height"):
+        if not re.search(rf"(?:^|;)\s*{name}\s*:", style, re.IGNORECASE):
+            separator = "" if not style or style.endswith(";") else ";"
+            style = f"{style}{separator}{name}:32px"
+    merged = without_dimensions[: style_match.start(2)] + style + without_dimensions[style_match.end(2) :]
+    return merged[:-1] + ' width="32" height="32">'
 
 
 def _is_inlineable_asset_url(url: str) -> bool:
