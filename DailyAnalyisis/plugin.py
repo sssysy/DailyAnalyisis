@@ -25,6 +25,7 @@ from .gscore_runtime import (
 from .src.utils.logger import logger
 from .src.shared.constants import PLUGIN_NAME, PLUGIN_VERSION
 from .src.utils.resilience import GlobalRateLimiter
+from .gscore_runtime.context import shutdown_playwright_browser
 from .src.shared.trace_context import TraceContext
 from .src.domain.services.statistics_service import StatisticsService
 from .src.infrastructure.platform.bot_manager import BotManager
@@ -305,6 +306,8 @@ class GroupDailyAnalysis(PluginBase):
 
             if self.report_generator:
                 await self.report_generator.close()
+
+            await shutdown_playwright_browser()
 
             # 3. [关键修复] 只有在任务全部清理后，才清理引用。
             # 实际上，在 terminate 结束后，self 本身就会被 GC 释放，

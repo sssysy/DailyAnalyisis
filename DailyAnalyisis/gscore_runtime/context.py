@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import json
+import time
 import base64
 import asyncio
 import hashlib
@@ -14,15 +15,6 @@ import aiohttp
 from .config import PluginPaths, PluginConfig
 from .provider import LLMUsage, LLMResponse
 
-_SVG_OPEN_TAG_RE = re.compile(r"<svg\b[^>]*>", re.IGNORECASE)
-_DOODLE_CLASS_RE = re.compile(
-    r'''\bclass\s*=\s*(["'])[^"']*\bdoodle\b[^"']*\1''',
-    re.IGNORECASE,
-)
-_SVG_DIMENSION_RE = re.compile(
-    r'''\s(?:width|height)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)''',
-    re.IGNORECASE,
-)
 _IMG_TAG_RE = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
 _IMG_SRC_RE = re.compile(r"\bsrc\s*=\s*(['\"])(.*?)\1", re.IGNORECASE | re.DOTALL)
 _CSS_URL_RE = re.compile(
@@ -38,34 +30,23 @@ _FALLBACK_IMAGE_DATA = (
     "fill='%23dbeafe'/%3E%3Ccircle cx='40' cy='30' r='12' fill='%2360a5fa'/%3E"
     "%3Cpath d='M16 68c4-16 44-16 48 0' fill='%2360a5fa'/%3E%3C/svg%3E"
 )
+_DEVICE_SCALE_FACTORS = {"normal": 1.0, "high": 1.3, "ultra": 1.8}
+_BROWSER_IDLE_SECONDS = 120.0
+_BROWSER_REAP_INTERVAL_SECONDS = 30.0
+_BROWSER_MAX_USES = 200
+_PAGE_LOAD_WAIT_MS = 3000
+_BROWSER_LAUNCH_ARGS = [
+    "--disable-gpu",
+    "--disable-software-rasterizer",
+    "--renderer-process-limit=1",
+]
 
-
-def _protect_inline_icons(html: str) -> str:
-    def replace_tag(match: re.Match[str]) -> str:
-        tag = match.group(0)
-        if _DOODLE_CLASS_RE.search(tag) is None:
-            return tag
-        without_dimensions = _SVG_DIMENSION_RE.sub("", tag)
-        style_match = re.search(r'''\sstyle\s*=\s*(["'])(.*?)\1''', without_dimensions, re.IGNORECASE | re.DOTALL)
-        if style_match:
-            style = style_match.group(2).rstrip()
-            if not re.search(r"(?:^|;)\s*width\s*:", style, re.IGNORECASE):
-                separator = "" if not style or style.endswith(";") else ";"
-                style = f"{style}{separator}width:32px"
-            if not re.search(r"(?:^|;)\s*height\s*:", style, re.IGNORECASE):
-                separator = "" if not style or style.endswith(";") else ";"
-                style = f"{style}{separator}height:32px"
-            replacement = style
-            without_dimensions = (
-                without_dimensions[: style_match.start(2)]
-                + replacement
-                + without_dimensions[style_match.end(2) :]
-            )
-        else:
-            without_dimensions = without_dimensions[:-1] + ' style="width:32px;height:32px"'
-        return without_dimensions[:-1] + ' width="32" height="32">'
-
-    return _SVG_OPEN_TAG_RE.sub(replace_tag, html)
+_playwright = None
+_browser = None
+_browser_uses = 0
+_browser_last_used = 0.0
+_browser_lock = asyncio.Lock()
+_browser_reaper: asyncio.Task | None = None
 
 
 def _is_inlineable_asset_url(url: str) -> bool:
@@ -213,6 +194,162 @@ def sanitize_rendered_html(html: str) -> str:
 
     html = _IMG_TAG_RE.sub(replace_img, html)
     return _UPLOADED_URL_RE.sub("none", html)
+
+
+def _playwright_options(options: dict | None) -> dict[str, object]:
+    opts = options or {}
+    viewport = opts.get("viewport")
+    if not isinstance(viewport, dict):
+        viewport = {}
+    width = max(1, int(opts.get("viewport_width", viewport.get("width", 1200))))
+    height = max(1, int(opts.get("viewport_height", viewport.get("height", 900))))
+    image_type = str(opts.get("type", "jpeg")).lower()
+    image_format = "jpeg" if image_type in {"jpg", "jpeg"} else "png"
+    scale_value = opts.get("device_scale_factor")
+    if scale_value is None:
+        level = str(opts.get("device_scale_factor_level", "high")).lower()
+        scale_value = _DEVICE_SCALE_FACTORS.get(level, 1.3)
+    try:
+        device_scale_factor = max(0.1, min(4.0, float(scale_value)))
+    except (TypeError, ValueError):
+        device_scale_factor = 1.3
+    try:
+        quality = max(1, min(100, int(opts.get("quality", 95))))
+    except (TypeError, ValueError):
+        quality = 95
+    try:
+        timeout = max(1.0, float(opts.get("timeout", 60000)) / 1000.0)
+    except (TypeError, ValueError):
+        timeout = 60.0
+    return {
+        "viewport_width": width,
+        "viewport_height": height,
+        "image_format": image_format,
+        "quality": quality,
+        "device_scale_factor": device_scale_factor,
+        "timeout": timeout,
+        "full_page": bool(opts.get("full_page", True)),
+    }
+
+
+async def _close_playwright_browser() -> None:
+    global _playwright, _browser, _browser_uses
+    if _browser is not None:
+        await _browser.close()
+        _browser = None
+    if _playwright is not None:
+        await _playwright.stop()
+        _playwright = None
+    _browser_uses = 0
+
+
+async def _shutdown_playwright_browser() -> None:
+    global _browser_reaper
+    reaper = _browser_reaper
+    _browser_reaper = None
+    if reaper is not None and reaper is not asyncio.current_task() and not reaper.done():
+        reaper.cancel()
+    await _close_playwright_browser()
+
+
+async def shutdown_playwright_browser() -> None:
+    """关闭常驻 Chromium 与 Playwright driver。"""
+    async with _browser_lock:
+        await _shutdown_playwright_browser()
+
+
+async def _get_playwright_browser():
+    global _playwright, _browser, _browser_uses
+    from playwright.async_api import async_playwright
+
+    if _playwright is None:
+        _playwright = await async_playwright().start()
+    if _browser is not None and (
+        not _browser.is_connected() or _browser_uses >= _BROWSER_MAX_USES
+    ):
+        if _browser.is_connected():
+            await _browser.close()
+        _browser = None
+    if _browser is None:
+        _browser = await _playwright.chromium.launch(
+            headless=True,
+            args=_BROWSER_LAUNCH_ARGS,
+        )
+        _browser_uses = 0
+    _browser_uses += 1
+    return _browser
+
+
+async def _reap_idle_playwright_browser() -> None:
+    global _browser_reaper
+    while True:
+        await asyncio.sleep(_BROWSER_REAP_INTERVAL_SECONDS)
+        async with _browser_lock:
+            if time.monotonic() - _browser_last_used < _BROWSER_IDLE_SECONDS:
+                continue
+            await _close_playwright_browser()
+        break
+    _browser_reaper = None
+
+
+def _ensure_playwright_reaper() -> None:
+    global _browser_reaper
+    if _browser_reaper is None or _browser_reaper.done():
+        _browser_reaper = asyncio.create_task(_reap_idle_playwright_browser())
+
+
+async def render_html_with_playwright(
+    html: str,
+    *,
+    options: dict | None = None,
+) -> bytes:
+    """使用 Playwright/Chromium 将 HTML 渲染为图片字节。"""
+    try:
+        from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+    except ImportError as exc:
+        raise RuntimeError(
+            "playwright 未安装，请执行 pip install playwright 和 playwright install chromium"
+        ) from exc
+
+    settings = _playwright_options(options)
+    timeout = float(settings["timeout"])
+    timeout_ms = int(timeout * 1000)
+    viewport = {
+        "width": int(settings["viewport_width"]),
+        "height": int(settings["viewport_height"]),
+    }
+    image_format = str(settings["image_format"])
+    quality = int(settings["quality"])
+    full_page = bool(settings["full_page"])
+    _ensure_playwright_reaper()
+
+    global _browser_last_used
+    async with _browser_lock:
+        _browser_last_used = time.monotonic()
+        browser = await _get_playwright_browser()
+        page = await browser.new_page(
+            viewport=viewport,
+            device_scale_factor=float(settings["device_scale_factor"]),
+        )
+        try:
+            page.set_default_timeout(timeout_ms)
+            page.set_default_navigation_timeout(timeout_ms)
+            await page.set_content(html, wait_until="load", timeout=timeout_ms)
+            try:
+                await page.evaluate("() => document.fonts.ready")
+            except Exception:
+                pass
+            await page.wait_for_timeout(_PAGE_LOAD_WAIT_MS)
+            payload = await page.screenshot(
+                type=image_format,
+                full_page=full_page,
+                quality=quality if image_format == "jpeg" else None,
+            )
+        except (PlaywrightTimeoutError, TimeoutError) as exc:
+            raise RuntimeError("Playwright 渲染超时") from exc
+        finally:
+            await page.close()
+    return bytes(payload)
 
 
 class _Provider:
@@ -473,20 +610,17 @@ class PluginBase:
         return_url: bool = True,
         options: dict | None = None,
     ):
-        from gsuid_core.utils.html_render import render_html_to_bytes
-
-        opts = options or {}
-        viewport = opts.get("viewport", {}) if isinstance(opts.get("viewport"), dict) else {}
-        width = float(viewport.get("width", 1200))
-        image_type = str(opts.get("type", "jpeg")).lower()
-        image_format = "jpeg" if image_type in {"jpg", "jpeg"} else "png"
         prepared_html = await inline_render_assets(tmpl)
-        return await render_html_to_bytes(
-            _protect_inline_icons(prepared_html),
-            max_width=width,
-            image_format=image_format,
-            jpeg_quality=int(opts.get("quality", 95)),
+        return await render_html_with_playwright(
+            prepared_html,
+            options=options,
         )
 
 
-__all__ = ["PluginBase", "PluginContext", "inline_render_assets"]
+__all__ = [
+    "PluginBase",
+    "PluginContext",
+    "inline_render_assets",
+    "render_html_with_playwright",
+    "shutdown_playwright_browser",
+]
