@@ -21,7 +21,15 @@ from .config_default import (
     DATA_DIR,
     CONFIG_PATH,
     CONFIG_DEFAULT,
+    LLM_CONFIG_PATH,
+    DAILY_CONFIG_LLM,
+    BASIC_CONFIG_PATH,
+    DAILY_CONFIG_BASIC,
     LEGACY_CONFIG_PATH,
+    PROMPT_CONFIG_PATH,
+    DAILY_CONFIG_PROMPT,
+    DISPLAY_CONFIG_PATH,
+    DAILY_CONFIG_DISPLAY,
     LEGACY_GSCORE_CONFIG_PATH,
 )
 
@@ -34,13 +42,63 @@ if CONFIG_PATH.exists():
     except (OSError, json.JSONDecodeError):
         _NESTED_BEFORE = None
 
-DailyConfig = StringConfig("DailyAnalyisis", CONFIG_PATH, CONFIG_DEFAULT)
-DailyConfig.plugin_name = "DailyAnalyisis"
+BasicConfig = StringConfig("DailyAnalyisis基础配置", BASIC_CONFIG_PATH, DAILY_CONFIG_BASIC)
+LLMConfig = StringConfig("DailyAnalyisis LLM配置", LLM_CONFIG_PATH, DAILY_CONFIG_LLM)
+DisplayConfig = StringConfig("DailyAnalyisis展示配置", DISPLAY_CONFIG_PATH, DAILY_CONFIG_DISPLAY)
+PromptConfig = StringConfig("DailyAnalyisis提示词配置", PROMPT_CONFIG_PATH, DAILY_CONFIG_PROMPT)
+for _config in (BasicConfig, LLMConfig, DisplayConfig, PromptConfig):
+    _config.plugin_name = "DailyAnalyisis"
+
+_CONFIGS = (BasicConfig, LLMConfig, DisplayConfig, PromptConfig)
+
+
+def _owner(key: str) -> StringConfig | None:
+    for config in _CONFIGS:
+        if key in config.config:
+            return config
+    return None
+
+
+class _DailyConfigFacade:
+    """兼容旧访问方式，按 key 路由到四张配置表。"""
+
+    @property
+    def config(self) -> dict[str, GSC]:
+        merged: dict[str, GSC] = {}
+        for config in _CONFIGS:
+            merged.update(config.config)
+        return merged
+
+    def get_config(self, key: str, default_value: object = None) -> GSC:
+        owner = _owner(key)
+        if owner is None:
+            raise KeyError(f"DailyAnalyisis 缺少配置项: {key}")
+        return owner.get_config(key, default_value)
+
+    def set_config(self, key: str, value: object) -> bool:
+        owner = _owner(key)
+        if owner is None:
+            return False
+        return bool(owner.set_config(key, value))  # type: ignore[arg-type]
+
+    def write_config(self) -> None:
+        for config in _CONFIGS:
+            config.write_config()
+
+    def pop(self, key: str, default: object = None) -> object:
+        for config in _CONFIGS:
+            if key in config.config:
+                return config.config.pop(key, default)
+        return default
+
+
+DailyConfig = _DailyConfigFacade()
 
 
 _LEGACY_OLD = DATA_DIR / "config_v2.legacy.json.old"
 _LEGACY_GSCORE_OLD = DATA_DIR / "gscore_config.json.old"
 _LEGACY_NESTED_OLD = DATA_DIR / "config_v2.json.old"
+_SPLIT_MIGRATION_MARK = DATA_DIR / "config_split_migrated.flag"
 
 _DIVIDER_ORDER = tuple(key.removeprefix("__divider__") for key in CONFIG_DEFAULT if key.startswith("__divider__"))
 
@@ -140,31 +198,32 @@ def _details_from_field(field: GSC) -> dict[str, Any]:
 
 def config_schema() -> dict[str, Any]:
     """按 GsCore 配置页结构生成 {group: {description, type, hint, items}}。"""
-    dividers = {
-        key.removeprefix("__divider__"): field
-        for key, field in CONFIG_DEFAULT.items()
-        if key.startswith("__divider__") and isinstance(field, GsDivider)
-    }
     schema: dict[str, Any] = {}
-    for key in _DIVIDER_ORDER:
-        divider = dividers.get(key)
-        schema[key] = {
-            "description": divider.title if divider else key,
-            "type": "object",
-            "hint": divider.desc if divider else "",
-            "items": {},
-        }
-    current_group = _DIVIDER_ORDER[0] if _DIVIDER_ORDER else "basic"
-    for key, field in CONFIG_DEFAULT.items():
-        if key.startswith("__divider__"):
-            divider_group = key.removeprefix("__divider__")
-            divider = dividers.get(divider_group)
-            current_group = str(divider.data) if divider else divider_group
-            continue
-        if isinstance(field, GsDivider):
-            continue
-        live_field = DailyConfig.config.get(key, field)
-        schema[current_group]["items"][key] = _details_from_field(live_field)
+    current_group: str | None = None
+    for config in _CONFIGS:
+        current_group = None
+        for key, field in config.config.items():
+            if key.startswith("__divider__"):
+                current_group = key.removeprefix("__divider__")
+                schema[current_group] = {
+                    "description": field.title,
+                    "type": "object",
+                    "hint": field.desc,
+                    "items": {},
+                }
+                continue
+            if current_group is None:
+                current_group = "basic"
+                schema.setdefault(
+                    current_group,
+                    {
+                        "description": "基础设置",
+                        "type": "object",
+                        "hint": "",
+                        "items": {},
+                    },
+                )
+            schema[current_group]["items"][key] = _details_from_field(field)
     return schema
 
 
@@ -317,6 +376,14 @@ def _unwrap_legacy_value(value: object) -> object:
 def _migrate_once() -> None:
     """旧配置一次性迁移：迁移后旧文件改名，避免重复导入。"""
     migrated = 0
+    split_imported = True
+    if not _SPLIT_MIGRATION_MARK.exists() and _NESTED_BEFORE is not None:
+        try:
+            migrated += _assign_legacy(_NESTED_BEFORE)
+            logger.info("已将单表配置导入四张配置表")
+        except (OSError, json.JSONDecodeError, TypeError) as exc:
+            split_imported = False
+            logger.error("导入单表配置失败: %s", exc)
     dotted_keys = [key for key in (DailyConfig.config or {}) if "." in key or key.startswith("__group__.")]
     if dotted_keys:
         for key in dotted_keys:
@@ -365,6 +432,11 @@ def _migrate_once() -> None:
     if migrated:
         DailyConfig.write_config()
         logger.info("DailyAnalyisis 配置迁移完成，共写入 %s 项", migrated)
+    if split_imported:
+        try:
+            _SPLIT_MIGRATION_MARK.write_text("1", encoding="utf-8")
+        except OSError as exc:
+            logger.warning("写入配置迁移标记失败: %s", exc)
 
 
 _migrate_once()

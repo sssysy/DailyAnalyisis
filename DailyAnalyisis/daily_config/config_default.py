@@ -21,6 +21,11 @@ CONFIG_PATH = DATA_DIR / "config_v2.json"
 LEGACY_CONFIG_PATH = DATA_DIR / "config.json"
 LEGACY_GSCORE_CONFIG_PATH = DATA_DIR / "gscore_config.json"
 
+BASIC_CONFIG_PATH = DATA_DIR / "config_basic.json"
+LLM_CONFIG_PATH = DATA_DIR / "config_llm.json"
+DISPLAY_CONFIG_PATH = DATA_DIR / "config_display.json"
+PROMPT_CONFIG_PATH = DATA_DIR / "config_prompt.json"
+
 
 def _repeat_field(title: str, desc: str, path: tuple[str, ...]) -> GsRepeatGroupConfig:
     if path[-1] == "comic_characters":
@@ -39,9 +44,12 @@ def _repeat_field(title: str, desc: str, path: tuple[str, ...]) -> GsRepeatGroup
     return GsRepeatGroupConfig(title=title, desc=desc, data=[], template=template)
 
 
-CONFIG_DEFAULT: Dict[str, GSC] = {
+_COMMON_CODES: Dict[str, GSC] = {
     "Enabled": GsBoolConfig("启用 DailyAnalyisis", "关闭后停止命令、消息归档、定时分析和增量分析。", True),
     "ExternalWebUIEnabled": GsBoolConfig("启用外部 WebUI", "开启后才会挂载 DailyAnalyisis 独立 WebUI。", False),
+}
+
+DAILY_CONFIG_BASIC: Dict[str, GSC] = {
     "__divider__basic": GsDivider("基础设置", "", "basic"),
     "BasicGroupListMode": GsStrConfig(
         "群聊权限模式",
@@ -135,6 +143,237 @@ CONFIG_DEFAULT: Dict[str, GSC] = {
         "WebUI 访问密码\n开启外部 WebUI 后首次进入页面时设置；以后可在这里输入新密码并保存。至少 8 个字符，留空表示保留当前密码。",
         "",
     ),
+    "__divider__auto_analysis": GsDivider("定时分析", "", "auto_analysis"),
+    "AutoAnalysisTime": GsListStrConfig(
+        "自动分析时间列表",
+        '自动分析时间列表\n每天几点自动出报告，格式是 HH:MM。可填多个时间，例如 ["09:00", "21:30"]。',
+        ["23:00"],
+    ),
+    "AutoAnalysisScheduledGroupListMode": GsStrConfig(
+        "定时分析名单模式",
+        "定时分析名单模式\n定时任务要作用到哪些群。inherit=直接继承基础群权限，不需要重复填写；whitelist=只跑下面列表里的群；blacklist=除了下面列表，其他都跑。定时名单始终不会绕过基础群权限。",
+        "whitelist",
+    ),
+    "AutoAnalysisScheduledGroupList": GsListStrConfig(
+        "定时分析群列表",
+        '定时分析群列表\n仅在 whitelist 或 blacklist 模式下使用。示例1：mode=whitelist + ["onebot:GroupMessage:123456"] => 只跑这个群。示例2：mode=blacklist + ["onebot:GroupMessage:123456"] => 这个群不跑，其他群跑。inherit 模式会忽略此列表并复用基础名单。whitelist + 空列表 = 不会开启定时任务。',
+        [],
+    ),
+    "__divider__analysis_features": GsDivider("分析功能", "", "analysis_features"),
+    "AnalysisTopicAnalysisEnabled": GsBoolConfig("启用话题分析", "启用话题分析\n是否使用LLM进行智能话题分析", True),
+    "AnalysisUserTitleAnalysisEnabled": GsBoolConfig(
+        "启用用户称号分析", "启用用户称号分析\n是否使用LLM进行用户称号分析", True
+    ),
+    "AnalysisGoldenQuoteAnalysisEnabled": GsBoolConfig("启用金句分析", "启用金句分析\n是否使用LLM进行金句分析", True),
+    "AnalysisChatQualityAnalysisEnabled": GsBoolConfig(
+        "启用聊天质量锐评", "启用聊天质量锐评\n是否使用LLM进行聊天质量锐评（维度化分析）", True
+    ),
+    "AnalysisMaxTopics": GsIntConfig(
+        "最大话题数量",
+        "最大话题数量\n分析报告中显示的最大话题数量，依赖于 LLM 输出的格式化信息质量，模型越好结果越好，可能出现数量不匹配。",
+        5,
+    ),
+    "AnalysisMaxUserTitles": GsIntConfig(
+        "最大用户称号数量",
+        "最大用户称号数量\n分析报告中显示的最大用户称号数量，依赖于 LLM 输出的格式化信息质量，模型越好结果越好，可能出现数量不匹配。",
+        8,
+    ),
+    "AnalysisMaxGoldenQuotes": GsIntConfig(
+        "最大金句数量",
+        "最大金句数量\n分析报告中显示的最大金句数量，依赖于 LLM 输出的格式化信息质量，模型越好结果越好，可能出现数量不匹配。",
+        5,
+    ),
+    "AnalysisKeepOriginalPersona": GsBoolConfig(
+        "继承会话人设风格",
+        "继承会话人设风格\n【优先级2】开启后将自动尝试识别当前群聊会话（或对话）的人格设定。若该群已设置人设，则分析报告会尽量模拟该人设的口吻进行回复。注意：此开关在“强制使用插件指定人格”关闭时才会生效。",
+        False,
+    ),
+    "AnalysisUsePluginSpecificPersona": GsBoolConfig(
+        "强制使用插件指定人格",
+        "强制使用插件指定人格\n【优先级1：核心开关】若开启，将完全忽略当前群聊的人格设定，统一强制使用下方选择的“插件指定人格 ID”进行分析。适用于希望全群分析保持某种统一固定风格（如特定的“记录员”人设）的情况。",
+        False,
+    ),
+    "AnalysisPluginSpecificPersonaId": GsStrConfig(
+        "插件指定人格 ID",
+        "插件指定人格 ID\n当“强制使用插件指定人格”开启时，在此处选择系统中已定义的人设。该人格会同时作用于画图提示词生成模型。若此处未选择，则仍会尝试识别全局默认人格。",
+        "",
+    ),
+    "__divider__incremental": GsDivider("增量分析", "", "incremental"),
+    "IncrementalGroupListMode": GsStrConfig(
+        "增量分析名单模式",
+        "增量分析名单模式\n哪些群用“增量分析”。inherit=直接继承定时分析的最终名单；whitelist=只有列表里的群用增量；blacklist=除了列表外都用增量。没命中的群会走普通模式。增量名单不负责绕过基础或定时名单，只负责选模式。",
+        "whitelist",
+    ),
+    "IncrementalGroupList": GsListStrConfig(
+        "增量分析群列表",
+        '增量分析群列表\n仅在 whitelist 或 blacklist 模式下使用。示例1：mode=whitelist + ["onebot:GroupMessage:123456"] => 只有这个群增量。示例2：mode=blacklist + ["onebot:GroupMessage:123456"] => 这个群不用增量，其他群用增量。inherit 模式会忽略此列表并复用定时分析名单。whitelist + 空列表 = 不启用增量。',
+        [],
+    ),
+    "IncrementalReportImmediately": GsBoolConfig(
+        "增量分析立即报告（调试用）",
+        "增量分析立即报告（调试用）\n【调试功能】启用后，每次增量分析完成后都会立即生成并发送一份最终报告。仅建议在调试时开启，生产环境请保持关闭，否则会频繁打扰群友。",
+        False,
+    ),
+    "IncrementalMinMessages": GsIntConfig(
+        "增量分析每批消息数",
+        "增量分析每批消息数\n目标群每累计到此消息数就触发一个固定规模的增量分析批次；不足时持续等待，待处理消息达到多个批次时会连续处理。建议根据模型上下文和群活跃度设置。",
+        300,
+    ),
+    "IncrementalTopicsPerBatch": GsIntConfig(
+        "单次增量提取话题数",
+        "单次增量提取话题数\n每次增量分析最多提取的话题数量。最终报告会汇总所有批次的话题。建议1-4。",
+        2,
+    ),
+    "IncrementalQuotesPerBatch": GsIntConfig(
+        "单次增量提取金句数",
+        "单次增量提取金句数\n每次增量分析最多提取的金句数量。最终报告会汇总所有批次的金句。建议1-2。",
+        2,
+    ),
+    "IncrementalFallbackEnabled": GsBoolConfig(
+        "增量失败自动回退全量分析",
+        "增量失败自动回退全量分析\n建议开启。开启后，如果增量分析失败，会自动改用普通分析，避免当天没报告。",
+        True,
+    ),
+    "__divider__performance": GsDivider("并发与限流", "", "performance"),
+    "PerformanceMaxConcurrentGroups": GsIntConfig(
+        "最大活跃任务数（任务总闸）",
+        "最大活跃任务数（任务总闸）\n限制同时有多少个群聊分析任务正在进行。主要用于【保护服务器内存和 IO】，防止瞬间读取过多群聊记录导致程序崩溃（OOM）。",
+        2,
+    ),
+    "PerformanceMaxConcurrentLlm": GsIntConfig(
+        "最大 LLM 请求并发数（API 闸口）",
+        "最大 LLM 请求并发数（API 闸口）\n限制同时发起的 AI 分析请求数量。主要用于【遵守 API 频率限制（RPM）】，避免因为请求过快导致 API 被封号或报错。",
+        4,
+    ),
+    "PerformanceMaxConcurrentT2i": GsIntConfig(
+        "最大 T2I渲染并发数", "最大 T2I渲染并发数\n限制同时开启的 T2I 渲染进程数。", 1
+    ),
+    "PerformanceStaggerSeconds": GsIntConfig(
+        "多群分析交错间隔（秒）",
+        "多群分析交错间隔（秒）\n当同时启动多个群组的定时分析任务时，每个任务之间的延迟间隔（秒），建议根据实际的 LLM 服务速度填写，过短可能导致请求堆积，过长则分析效率降低。",
+        30,
+    ),
+}
+
+DAILY_CONFIG_LLM: Dict[str, GSC] = {
+    "__divider__llm": GsDivider("LLM 设置", "", "llm"),
+    "LLMApiKey": GsStrConfig(
+        "插件专用 API Key",
+        "插件专用 API Key\n仅保存在本插件配置中，并通过 Authorization 请求头发送；不会读取 GsCore 全局 AI Key。",
+        "",
+    ),
+    "LLMApiUrl": GsStrConfig(
+        "插件专用 API 端点 URL",
+        "插件专用 API 端点 URL\n填写 OpenAI 兼容接口的根地址，例如 https://chisa.akiyo.fun/v1；插件会自动请求 /chat/completions。",
+        "https://chisa.akiyo.fun/v1",
+    ),
+    "LLMModel": GsStrConfig(
+        "插件专用模型名称",
+        "插件专用模型名称\n所有话题、称号、金句、质量分析和漫画分镜请求都使用此模型。",
+        "gpt-4o-mini",
+    ),
+    "LLMTemperature": GsFloatConfig(
+        "默认 temperature", "默认 temperature\n插件请求的默认采样温度；结构化输出重试会按插件内置策略临时降低。", 0.7
+    ),
+    "LLMMaxTokens": GsIntConfig(
+        "单次请求最大输出 Token", "单次请求最大输出 Token\n发送给兼容接口的 max_tokens 上限。", 8192, max_value=32768
+    ),
+    "LLMTimeout": GsIntConfig(
+        "API 请求超时（秒）", "API 请求超时（秒）\n插件独立 HTTP 请求的总超时时间。", 120, max_value=600
+    ),
+    "LLMRetries": GsIntConfig(
+        "LLM 请求重试次数", "LLM 请求重试次数\n当请求超时或失败时自动重试的次数，建议设置为1~3之间。", 2
+    ),
+    "LLMBackoff": GsIntConfig(
+        "LLM 请求重试退避基值（秒）",
+        "LLM 请求重试退避基值（秒）\n重试之间的基准等待时间（秒）。实际等待时间会随尝试次数指数增长，并加入少量随机抖动；当专用 Provider 失败后，会继续按队列尝试默认 Provider。",
+        2,
+    ),
+    "LLMEnableStreamingLlmCall": GsBoolConfig(
+        "启用流式 LLM 调用",
+        "启用流式 LLM 调用\n默认关闭，使用非流式调用方式。开启后，插件将使用本插件 API 端点的 stream=true 接口并聚合结果。",
+        False,
+    ),
+    "__divider__daily_comic": GsDivider("每日漫画", "", "daily_comic"),
+    "ComicEnableDailyComic": GsBoolConfig(
+        "启用漫画功能",
+        "启用漫画功能\n漫画总开关。关闭时，/群漫画 和所有自动联动漫画都会停止。开启后可继续通过下方“分析后自动生成漫画”单独控制自动联动。",
+        False,
+    ),
+    "ComicEnableAutoDailyComic": GsBoolConfig(
+        "分析后自动生成漫画",
+        "分析后自动生成漫画\n控制手动群分析、定时分析和增量最终报告完成后是否自动生成漫画。关闭后仍可手动使用 /群漫画，且不会重复执行话题分析链路。",
+        True,
+    ),
+    "ComicGroupListMode": GsStrConfig(
+        "漫画群名单模式",
+        "漫画群名单模式\n只控制漫画生成，不影响报告名单。inherit=继承基础群权限，适合漫画和分析使用同一批群且无需重复填写；blacklist=除列表外都允许生成漫画，适合只开放漫画不开放分析；whitelist=只允许列表里的群生成漫画。白名单为空时不会为任何群生成漫画。",
+        "inherit",
+    ),
+    "ComicGroupList": GsListStrConfig(
+        "漫画群白/黑名单列表",
+        "漫画群白/黑名单列表\n用于漫画生成的群列表。可以填完整会话ID（如 onebot:GroupMessage:123456）或只填群号。自动漫画和 /群漫画 手动命令都会检查这里。",
+        [],
+    ),
+    "ComicRandomDailyComicCharacter": GsBoolConfig(
+        "每天随机切换漫画角色",
+        "每天随机切换漫画角色\n开启后每天首次生成漫画时，会从下方已启用的角色方案随机选择一个，并按运行环境时区在当天持续使用；重启不会改变当天选择。关闭时固定使用第一个已启用方案。",
+        False,
+    ),
+    "ComicCharacters": _repeat_field(
+        "漫画角色方案",
+        "漫画角色方案\n每个方案可绑定漫画专用人格、参考图和场景分析提示词。方案条目可展开编辑；请使用不同的方案名称，方便识别当天随机选中的角色。未配置方案时仍可正常文生图。",
+        ("daily_comic", "comic_characters"),
+    ),
+    "ComicDrawingReferenceImage": GsStrConfig(
+        "旧版漫画参考图（兼容迁移）", "旧版漫画参考图（兼容迁移）\n旧版配置仅用于自动迁移，不再在面板中显示。", "[]"
+    ),
+    "ComicDrawingBackend": GsStrConfig(
+        "绘图后端",
+        "绘图后端\nGsCore 版本统一使用本插件内置绘图客户端，并按绘图供应商配置表调用图片生成 API。",
+        "builtin",
+    ),
+    "ComicDrawingExternalFallback": GsBoolConfig(
+        "外部后端失败时回退内置后端",
+        "外部后端失败时回退内置后端\n旧版配置仅用于兼容迁移，GsCore 版本始终使用内置绘图客户端。",
+        True,
+    ),
+    "ComicDrawingProviderOverrides": _repeat_field(
+        "绘图供应商配置表",
+        "绘图供应商配置表\n可添加多个绘图供应商。按 priority 从高到低尝试，同优先级按表中顺序尝试；所有候选失败后才判定漫画生成失败。至少添加一个包含 API Key 的启用条目。",
+        ("daily_comic", "drawing_provider_overrides"),
+    ),
+    "ComicDrawingProxy": GsStrConfig(
+        "全局生图代理地址",
+        "全局生图代理地址\n填写即代理漫画生图 API 及其返回图片下载，留空不使用。支持 http://host:port、https://host:port、socks5://host:port；供应商配置表中的代理优先于此设置。",
+        "",
+    ),
+    "ComicDrawingOutputExceptionRetries": GsIntConfig(
+        "输出异常重试次数",
+        "输出异常重试次数\n当触发屏蔽词/审核等异常时的自动重试次数。次数耗尽后会交给LLM进行改写救场。",
+        3,
+    ),
+    "ComicDrawingOutputExceptionRetryKeywords": GsListStrConfig(
+        "输出异常触发关键词",
+        "输出异常触发关键词\n当绘图错误信息包含任一关键词时，将其视为内容生成或安全审核异常，并使用同一接口配置重试；重试耗尽后可由 LLM 改写 Prompt。留空则不执行此类内容重试和 Prompt 改写。",
+        [],
+    ),
+    "ComicDrawingRetryDelay": GsIntConfig(
+        "画图重试等待时间 (秒)",
+        "画图重试等待时间 (秒)\n遇到异常或网络报错时，等待多长时间后重试。针对容易超载的接口建议调高，如 5 或 10。",
+        2,
+    ),
+    "ComicDrawingNetworkRetries": GsIntConfig(
+        "网络错误重试次数", "网络错误重试次数\n请求超时、限流或服务端错误时的重试次数；内容审核重试次数请单独配置。", 2
+    ),
+    "ComicDrawingDownloadProxy": GsStrConfig(
+        "图片下载代理",
+        "图片下载代理\n下载绘图 API 返回的图片 URL 时使用的代理，格式为 http://host:port 或 socks5://host:port。留空则不使用代理。",
+        "",
+    ),
+}
+
+DAILY_CONFIG_DISPLAY: Dict[str, GSC] = {
     "__divider__qq_official": GsDivider("QQ 官方", "", "qq_official"),
     "QQOfficialEnableT2iActivityHistogram": GsBoolConfig(
         "启用 T2I 群聊概览图",
@@ -217,212 +456,6 @@ CONFIG_DEFAULT: Dict[str, GSC] = {
     "T2IOverseasGstatic": GsStrConfig(
         "[海外] Gstatic 官方", "[海外] Gstatic 官方\n海外环境通常直接使用官方地址即可。", "https://fonts.gstatic.com"
     ),
-    "__divider__auto_analysis": GsDivider("定时分析", "", "auto_analysis"),
-    "AutoAnalysisTime": GsListStrConfig(
-        "自动分析时间列表",
-        '自动分析时间列表\n每天几点自动出报告，格式是 HH:MM。可填多个时间，例如 ["09:00", "21:30"]。',
-        ["23:00"],
-    ),
-    "AutoAnalysisScheduledGroupListMode": GsStrConfig(
-        "定时分析名单模式",
-        "定时分析名单模式\n定时任务要作用到哪些群。inherit=直接继承基础群权限，不需要重复填写；whitelist=只跑下面列表里的群；blacklist=除了下面列表，其他都跑。定时名单始终不会绕过基础群权限。",
-        "whitelist",
-    ),
-    "AutoAnalysisScheduledGroupList": GsListStrConfig(
-        "定时分析群列表",
-        '定时分析群列表\n仅在 whitelist 或 blacklist 模式下使用。示例1：mode=whitelist + ["onebot:GroupMessage:123456"] => 只跑这个群。示例2：mode=blacklist + ["onebot:GroupMessage:123456"] => 这个群不跑，其他群跑。inherit 模式会忽略此列表并复用基础名单。whitelist + 空列表 = 不会开启定时任务。',
-        [],
-    ),
-    "__divider__llm": GsDivider("LLM 设置", "", "llm"),
-    "LLMApiKey": GsStrConfig(
-        "插件专用 API Key",
-        "插件专用 API Key\n仅保存在本插件配置中，并通过 Authorization 请求头发送；不会读取 GsCore 全局 AI Key。",
-        "",
-    ),
-    "LLMApiUrl": GsStrConfig(
-        "插件专用 API 端点 URL",
-        "插件专用 API 端点 URL\n填写 OpenAI 兼容接口的根地址，例如 https://chisa.akiyo.fun/v1；插件会自动请求 /chat/completions。",
-        "https://chisa.akiyo.fun/v1",
-    ),
-    "LLMModel": GsStrConfig(
-        "插件专用模型名称",
-        "插件专用模型名称\n所有话题、称号、金句、质量分析和漫画分镜请求都使用此模型。",
-        "gpt-4o-mini",
-    ),
-    "LLMTemperature": GsFloatConfig(
-        "默认 temperature", "默认 temperature\n插件请求的默认采样温度；结构化输出重试会按插件内置策略临时降低。", 0.7
-    ),
-    "LLMMaxTokens": GsIntConfig(
-        "单次请求最大输出 Token", "单次请求最大输出 Token\n发送给兼容接口的 max_tokens 上限。", 8192, max_value=32768
-    ),
-    "LLMTimeout": GsIntConfig(
-        "API 请求超时（秒）", "API 请求超时（秒）\n插件独立 HTTP 请求的总超时时间。", 120, max_value=600
-    ),
-    "LLMRetries": GsIntConfig(
-        "LLM 请求重试次数", "LLM 请求重试次数\n当请求超时或失败时自动重试的次数，建议设置为1~3之间。", 2
-    ),
-    "LLMBackoff": GsIntConfig(
-        "LLM 请求重试退避基值（秒）",
-        "LLM 请求重试退避基值（秒）\n重试之间的基准等待时间（秒）。实际等待时间会随尝试次数指数增长，并加入少量随机抖动；当专用 Provider 失败后，会继续按队列尝试默认 Provider。",
-        2,
-    ),
-    "LLMEnableStreamingLlmCall": GsBoolConfig(
-        "启用流式 LLM 调用",
-        "启用流式 LLM 调用\n默认关闭，使用非流式调用方式。开启后，插件将使用本插件 API 端点的 stream=true 接口并聚合结果。",
-        False,
-    ),
-    "__divider__analysis_features": GsDivider("分析功能", "", "analysis_features"),
-    "AnalysisTopicAnalysisEnabled": GsBoolConfig("启用话题分析", "启用话题分析\n是否使用LLM进行智能话题分析", True),
-    "AnalysisUserTitleAnalysisEnabled": GsBoolConfig(
-        "启用用户称号分析", "启用用户称号分析\n是否使用LLM进行用户称号分析", True
-    ),
-    "AnalysisGoldenQuoteAnalysisEnabled": GsBoolConfig("启用金句分析", "启用金句分析\n是否使用LLM进行金句分析", True),
-    "AnalysisChatQualityAnalysisEnabled": GsBoolConfig(
-        "启用聊天质量锐评", "启用聊天质量锐评\n是否使用LLM进行聊天质量锐评（维度化分析）", True
-    ),
-    "AnalysisMaxTopics": GsIntConfig(
-        "最大话题数量",
-        "最大话题数量\n分析报告中显示的最大话题数量，依赖于 LLM 输出的格式化信息质量，模型越好结果越好，可能出现数量不匹配。",
-        5,
-    ),
-    "AnalysisMaxUserTitles": GsIntConfig(
-        "最大用户称号数量",
-        "最大用户称号数量\n分析报告中显示的最大用户称号数量，依赖于 LLM 输出的格式化信息质量，模型越好结果越好，可能出现数量不匹配。",
-        8,
-    ),
-    "AnalysisMaxGoldenQuotes": GsIntConfig(
-        "最大金句数量",
-        "最大金句数量\n分析报告中显示的最大金句数量，依赖于 LLM 输出的格式化信息质量，模型越好结果越好，可能出现数量不匹配。",
-        5,
-    ),
-    "AnalysisKeepOriginalPersona": GsBoolConfig(
-        "继承会话人设风格",
-        "继承会话人设风格\n【优先级2】开启后将自动尝试识别当前群聊会话（或对话）的人格设定。若该群已设置人设，则分析报告会尽量模拟该人设的口吻进行回复。注意：此开关在“强制使用插件指定人格”关闭时才会生效。",
-        False,
-    ),
-    "AnalysisUsePluginSpecificPersona": GsBoolConfig(
-        "强制使用插件指定人格",
-        "强制使用插件指定人格\n【优先级1：核心开关】若开启，将完全忽略当前群聊的人格设定，统一强制使用下方选择的“插件指定人格 ID”进行分析。适用于希望全群分析保持某种统一固定风格（如特定的“记录员”人设）的情况。",
-        False,
-    ),
-    "AnalysisPluginSpecificPersonaId": GsStrConfig(
-        "插件指定人格 ID",
-        "插件指定人格 ID\n当“强制使用插件指定人格”开启时，在此处选择系统中已定义的人设。该人格会同时作用于画图提示词生成模型。若此处未选择，则仍会尝试识别全局默认人格。",
-        "",
-    ),
-    "__divider__daily_comic": GsDivider("每日漫画", "", "daily_comic"),
-    "ComicEnableDailyComic": GsBoolConfig(
-        "启用漫画功能",
-        "启用漫画功能\n漫画总开关。关闭时，/群漫画 和所有自动联动漫画都会停止。开启后可继续通过下方“分析后自动生成漫画”单独控制自动联动。",
-        False,
-    ),
-    "ComicEnableAutoDailyComic": GsBoolConfig(
-        "分析后自动生成漫画",
-        "分析后自动生成漫画\n控制手动群分析、定时分析和增量最终报告完成后是否自动生成漫画。关闭后仍可手动使用 /群漫画，且不会重复执行话题分析链路。",
-        True,
-    ),
-    "ComicGroupListMode": GsStrConfig(
-        "漫画群名单模式",
-        "漫画群名单模式\n只控制漫画生成，不影响报告名单。inherit=继承基础群权限，适合漫画和分析使用同一批群且无需重复填写；blacklist=除列表外都允许生成漫画，适合只开放漫画不开放分析；whitelist=只允许列表里的群生成漫画。白名单为空时不会为任何群生成漫画。",
-        "inherit",
-    ),
-    "ComicGroupList": GsListStrConfig(
-        "漫画群白/黑名单列表",
-        "漫画群白/黑名单列表\n用于漫画生成的群列表。可以填完整会话ID（如 onebot:GroupMessage:123456）或只填群号。自动漫画和 /群漫画 手动命令都会检查这里。",
-        [],
-    ),
-    "ComicRandomDailyComicCharacter": GsBoolConfig(
-        "每天随机切换漫画角色",
-        "每天随机切换漫画角色\n开启后每天首次生成漫画时，会从下方已启用的角色方案随机选择一个，并按运行环境时区在当天持续使用；重启不会改变当天选择。关闭时固定使用第一个已启用方案。",
-        False,
-    ),
-    "ComicCharacters": _repeat_field(
-        "漫画角色方案",
-        "漫画角色方案\n每个方案可绑定漫画专用人格、参考图和场景分析提示词。方案条目可展开编辑；请使用不同的方案名称，方便识别当天随机选中的角色。未配置方案时仍可正常文生图。",
-        ("daily_comic", "comic_characters"),
-    ),
-    "ComicDrawingReferenceImage": GsStrConfig(
-        "旧版漫画参考图（兼容迁移）", "旧版漫画参考图（兼容迁移）\n旧版配置仅用于自动迁移，不再在面板中显示。", "[]"
-    ),
-    "ComicDrawingBackend": GsStrConfig(
-        "绘图后端",
-        "绘图后端\nGsCore 版本统一使用本插件内置绘图客户端，并按绘图供应商配置表调用图片生成 API。",
-        "builtin",
-    ),
-    "ComicDrawingExternalFallback": GsBoolConfig(
-        "外部后端失败时回退内置后端",
-        "外部后端失败时回退内置后端\n旧版配置仅用于兼容迁移，GsCore 版本始终使用内置绘图客户端。",
-        True,
-    ),
-    "ComicDrawingProviderOverrides": _repeat_field(
-        "绘图供应商配置表",
-        "绘图供应商配置表\n可添加多个绘图供应商。按 priority 从高到低尝试，同优先级按表中顺序尝试；所有候选失败后才判定漫画生成失败。至少添加一个包含 API Key 的启用条目。",
-        ("daily_comic", "drawing_provider_overrides"),
-    ),
-    "ComicDrawingProxy": GsStrConfig(
-        "全局生图代理地址",
-        "全局生图代理地址\n填写即代理漫画生图 API 及其返回图片下载，留空不使用。支持 http://host:port、https://host:port、socks5://host:port；供应商配置表中的代理优先于此设置。",
-        "",
-    ),
-    "ComicDrawingOutputExceptionRetries": GsIntConfig(
-        "输出异常重试次数",
-        "输出异常重试次数\n当触发屏蔽词/审核等异常时的自动重试次数。次数耗尽后会交给LLM进行改写救场。",
-        3,
-    ),
-    "ComicDrawingOutputExceptionRetryKeywords": GsListStrConfig(
-        "输出异常触发关键词",
-        "输出异常触发关键词\n当绘图错误信息包含任一关键词时，将其视为内容生成或安全审核异常，并使用同一接口配置重试；重试耗尽后可由 LLM 改写 Prompt。留空则不执行此类内容重试和 Prompt 改写。",
-        [],
-    ),
-    "ComicDrawingRetryDelay": GsIntConfig(
-        "画图重试等待时间 (秒)",
-        "画图重试等待时间 (秒)\n遇到异常或网络报错时，等待多长时间后重试。针对容易超载的接口建议调高，如 5 或 10。",
-        2,
-    ),
-    "ComicDrawingNetworkRetries": GsIntConfig(
-        "网络错误重试次数", "网络错误重试次数\n请求超时、限流或服务端错误时的重试次数；内容审核重试次数请单独配置。", 2
-    ),
-    "ComicDrawingDownloadProxy": GsStrConfig(
-        "图片下载代理",
-        "图片下载代理\n下载绘图 API 返回的图片 URL 时使用的代理，格式为 http://host:port 或 socks5://host:port。留空则不使用代理。",
-        "",
-    ),
-    "__divider__incremental": GsDivider("增量分析", "", "incremental"),
-    "IncrementalGroupListMode": GsStrConfig(
-        "增量分析名单模式",
-        "增量分析名单模式\n哪些群用“增量分析”。inherit=直接继承定时分析的最终名单；whitelist=只有列表里的群用增量；blacklist=除了列表外都用增量。没命中的群会走普通模式。增量名单不负责绕过基础或定时名单，只负责选模式。",
-        "whitelist",
-    ),
-    "IncrementalGroupList": GsListStrConfig(
-        "增量分析群列表",
-        '增量分析群列表\n仅在 whitelist 或 blacklist 模式下使用。示例1：mode=whitelist + ["onebot:GroupMessage:123456"] => 只有这个群增量。示例2：mode=blacklist + ["onebot:GroupMessage:123456"] => 这个群不用增量，其他群用增量。inherit 模式会忽略此列表并复用定时分析名单。whitelist + 空列表 = 不启用增量。',
-        [],
-    ),
-    "IncrementalReportImmediately": GsBoolConfig(
-        "增量分析立即报告（调试用）",
-        "增量分析立即报告（调试用）\n【调试功能】启用后，每次增量分析完成后都会立即生成并发送一份最终报告。仅建议在调试时开启，生产环境请保持关闭，否则会频繁打扰群友。",
-        False,
-    ),
-    "IncrementalMinMessages": GsIntConfig(
-        "增量分析每批消息数",
-        "增量分析每批消息数\n目标群每累计到此消息数就触发一个固定规模的增量分析批次；不足时持续等待，待处理消息达到多个批次时会连续处理。建议根据模型上下文和群活跃度设置。",
-        300,
-    ),
-    "IncrementalTopicsPerBatch": GsIntConfig(
-        "单次增量提取话题数",
-        "单次增量提取话题数\n每次增量分析最多提取的话题数量。最终报告会汇总所有批次的话题。建议1-4。",
-        2,
-    ),
-    "IncrementalQuotesPerBatch": GsIntConfig(
-        "单次增量提取金句数",
-        "单次增量提取金句数\n每次增量分析最多提取的金句数量。最终报告会汇总所有批次的金句。建议1-2。",
-        2,
-    ),
-    "IncrementalFallbackEnabled": GsBoolConfig(
-        "增量失败自动回退全量分析",
-        "增量失败自动回退全量分析\n建议开启。开启后，如果增量分析失败，会自动改用普通分析，避免当天没报告。",
-        True,
-    ),
     "__divider__html": GsDivider("HTML 输出", "", "html"),
     "HTMLBaseUrl": GsStrConfig(
         "外鏈 Base URL",
@@ -474,6 +507,9 @@ CONFIG_DEFAULT: Dict[str, GSC] = {
     "UploadComicAlbumName": GsStrConfig(
         "漫画相册名称（已停用）", "漫画相册名称（已停用）\n群相册上传已停用，此配置仅为保留旧值。", ""
     ),
+}
+
+DAILY_CONFIG_PROMPT: Dict[str, GSC] = {
     "__divider__prompts": GsDivider("提示词", "", "prompts"),
     "PromptTopicAnalysisPromptsTopicPrompt": GsStrConfig(
         "默认话题分析提示词",
@@ -505,23 +541,12 @@ CONFIG_DEFAULT: Dict[str, GSC] = {
         "默认漫画场景分析提示词\n让大模型根据核心话题生成丰富生动的多格连环漫画画图提示词",
         '你是一个资深的漫画分镜师与 AI 绘画提示词专家。\n请根据以下给出的【群聊每日核心话题列表】，站在你【当前的人格角色设定】（详见系统注入的身份）的视角与语气，将其改编并设计为一个精彩的多格连环漫画（Comic Strip）全景视觉画图提示词 (Prompt)。\n\n【核心视觉、台词与双层排版规则】：\n1. 【全话题必须覆盖（共 ${topic_count} 个分格）】：给出的待创作核心话题列表中共有 ${topic_count} 个话题，你必须为每一个话题分别设计一个分格 Panel（即 Panel 1 到 Panel ${topic_count}），绝对不许随意裁减、挑选或遗漏任何一个话题！\n2. 【人设口语化台词改编】：绝对严禁将报告分析总结原文直接放进对话框！必须以【你当前的人格语气/性格/口吻】（例如傲娇、萌系或专属说话风格），将每个话题的事件提炼改编为一句角色在漫画中的生动台词或吐槽，【每条台词控制在 15 个汉字以内】（例如：“呜呜！家里云又断网了啦！”、“萝卜子才没有降智！那都是Gemini的错！”）。\n3. 【精美双层文字排版（气泡 + 可爱旁白字幕条）】：\n   - 【角色的气泡】：在描述英文 Prompt 时，指定样式为“adorable kawaii anime speech bubble, soft rounded cloud-like shape, cute pointer tail pointing to the speaker”。\n   - 【分格底部的事件旁白条】：将每个话题概括为生动精炼的短标题（控制在 30 字以内，严禁带有“【事件】”字样），在 Prompt 中指定样式为“cute pastel-colored kawaii caption strip at the bottom of the panel with soft rounded corners”，严禁死板白框！\n4. 【中文文本显式渲染】：画面整体构图与场景描述使用英文，但气泡与底部旁白条内渲染的中文必须显式指定（指令格式：containing a speech bubble with exact Chinese text "人设吐槽台词" 以及 and a cute caption strip at bottom with exact Chinese text "精炼话题短标题"），绝对禁止将中文翻译成英文！\n5. 【话题内容直传与文字渲染约束】：在生成传给生图 LLM 的英文提示词 (scene) 时，对于每一个分格，除了描述具体的视觉画面外，你必须将该话题的【完整详情（翻译为英文）】作为 Background Context 附加在该分格的提示词中，帮助生图模型理解剧情。但同时，必须极其强烈地警告生图模型：“绝对禁止将长篇上下文写在画面上，仅允许渲染短标题字幕条和气泡台词！”（示例：Background Context: [Details]. STRICT RULE: DO NOT render the background context text! ONLY render the exact Chinese text in the bubble and caption strip!）。\n6. 【核心角色强制全覆盖】：在提示词中必须明确要求并描述，每一个分格 (Panel) 都必须无一例外地出现你当前的人格设定（即参考图中的核心角色，例如 1girl, [特定外貌特征] 等），保持整篇连环画的主角绝对连贯！\n\n【待创作的群聊核心话题列表】：\n${chat_content}\n\n请输出包含 "scene" 字段的 JSON 对象。\n',
     ),
-    "__divider__performance": GsDivider("并发与限流", "", "performance"),
-    "PerformanceMaxConcurrentGroups": GsIntConfig(
-        "最大活跃任务数（任务总闸）",
-        "最大活跃任务数（任务总闸）\n限制同时有多少个群聊分析任务正在进行。主要用于【保护服务器内存和 IO】，防止瞬间读取过多群聊记录导致程序崩溃（OOM）。",
-        2,
-    ),
-    "PerformanceMaxConcurrentLlm": GsIntConfig(
-        "最大 LLM 请求并发数（API 闸口）",
-        "最大 LLM 请求并发数（API 闸口）\n限制同时发起的 AI 分析请求数量。主要用于【遵守 API 频率限制（RPM）】，避免因为请求过快导致 API 被封号或报错。",
-        4,
-    ),
-    "PerformanceMaxConcurrentT2i": GsIntConfig(
-        "最大 T2I渲染并发数", "最大 T2I渲染并发数\n限制同时开启的 T2I 渲染进程数。", 1
-    ),
-    "PerformanceStaggerSeconds": GsIntConfig(
-        "多群分析交错间隔（秒）",
-        "多群分析交错间隔（秒）\n当同时启动多个群组的定时分析任务时，每个任务之间的延迟间隔（秒），建议根据实际的 LLM 服务速度填写，过短可能导致请求堆积，过长则分析效率降低。",
-        30,
-    ),
+}
+
+CONFIG_DEFAULT: Dict[str, GSC] = {
+    **_COMMON_CODES,
+    **DAILY_CONFIG_BASIC,
+    **DAILY_CONFIG_LLM,
+    **DAILY_CONFIG_DISPLAY,
+    **DAILY_CONFIG_PROMPT,
 }
