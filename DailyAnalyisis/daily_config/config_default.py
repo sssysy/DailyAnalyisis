@@ -51,6 +51,7 @@ _COMMON_CODES: Dict[str, GSC] = {
 
 DAILY_CONFIG_BASIC: Dict[str, GSC] = {
     "__divider__basic": GsDivider("基础设置", "", "basic"),
+    **_COMMON_CODES,
     "BasicGroupListMode": GsStrConfig(
         "群聊权限模式",
         '群聊权限模式\n先决定“哪些群可以用这个插件”。这是第一道门槛：不通过这里，后面的定时/增量都不会触发。whitelist=只允许列表里的群；blacklist=屏蔽列表里的群；none=所有群都可以。示例：whitelist + ["onebot:GroupMessage:123456"] 表示只有这个群能用。',
