@@ -35,31 +35,51 @@ class ReportDispatcher:
         self.report_generator = report_generator
         self.message_sender = message_sender
         self._html_render_func: Callable | None = None
-        self._bot: object | None = None
-        self._subscription: object | None = None
 
-    async def _send(self, messages: list) -> bool:
-        if self._bot is not None:
-            return await send_messages(self._bot, messages)
-        if self._subscription is not None:
-            return await send_subscription(self._subscription, messages)
+    async def _send(
+        self,
+        messages: list,
+        bot: object | None = None,
+        subscription: object | None = None,
+    ) -> bool:
+        if bot is not None:
+            return await send_messages(bot, messages)
+        if subscription is not None:
+            return await send_subscription(subscription, messages)
         logger.error("报告发送失败：没有可用的 Bot 或订阅目标")
         return False
 
-    async def _send_text(self, text: str) -> bool:
-        return await self._send([text_message(text)])
+    async def _send_text(
+        self,
+        text: str,
+        bot: object | None = None,
+        subscription: object | None = None,
+    ) -> bool:
+        return await self._send([text_message(text)], bot, subscription)
 
-    async def _send_image(self, image: str | bytes, caption: str = "") -> bool:
+    async def _send_image(
+        self,
+        image: str | bytes,
+        caption: str = "",
+        bot: object | None = None,
+        subscription: object | None = None,
+    ) -> bool:
         messages = [image_message(image)]
         if caption:
             messages.append(text_message(caption))
-        return await self._send(messages)
+        return await self._send(messages, bot, subscription)
 
-    async def _send_file(self, path: str, caption: str = "") -> bool:
+    async def _send_file(
+        self,
+        path: str,
+        caption: str = "",
+        bot: object | None = None,
+        subscription: object | None = None,
+    ) -> bool:
         messages = [file_message(path)]
         if caption:
             messages.append(text_message(caption))
-        return await self._send(messages)
+        return await self._send(messages, bot, subscription)
 
     def set_html_render(self, render_func: Callable):
         """设置 HTML 渲染函数 (运行时注入)"""
@@ -77,15 +97,49 @@ class ReportDispatcher:
         platform_id: str | None = None,
     ) -> bool:
         """分发分析报告，并返回至少一种格式是否实际发送成功。"""
-        self._bot = bot
-        self._subscription = None
+        return await self._dispatch_impl(
+            group_id,
+            analysis_result,
+            platform_id,
+            bot=bot,
+            subscription=None,
+            log_prefix="报告",
+        )
+
+    async def dispatch_to_subscription(
+        self,
+        subscription: object,
+        group_id: str,
+        analysis_result: dict[str, Any],
+        platform_id: str | None = None,
+    ) -> bool:
+        """定时路径：通过 gs_subscribe 订阅目标发送。"""
+        return await self._dispatch_impl(
+            group_id,
+            analysis_result,
+            platform_id,
+            bot=None,
+            subscription=subscription,
+            log_prefix="订阅报告",
+        )
+
+    async def _dispatch_impl(
+        self,
+        group_id: str,
+        analysis_result: dict[str, Any],
+        platform_id: str | None,
+        *,
+        bot: object | None,
+        subscription: object | None,
+        log_prefix: str,
+    ) -> bool:
         trace_id = TraceContext.get()
         trace_ctx = TraceContext.current()
         output_formats = self.config_manager.get_output_format()
         if isinstance(output_formats, str):
             output_formats = [output_formats]
 
-        logger.info(f"[{trace_id}] 正在分发群 {group_id} 的报告 (格式: {', '.join(output_formats)})")
+        logger.info(f"[{trace_id}] 正在分发群 {group_id} 的{log_prefix} (格式: {', '.join(output_formats)})")
 
         span_exists = bool(
             trace_ctx
@@ -131,10 +185,20 @@ class ReportDispatcher:
                                 analysis_result,
                                 platform_id,
                                 template_theme=selected_template,
+                                bot=bot,
+                                subscription=subscription,
                             )
                         )
                     else:
-                        ok = bool(await handler(group_id, analysis_result, platform_id))
+                        ok = bool(
+                            await handler(
+                                group_id,
+                                analysis_result,
+                                platform_id,
+                                bot=bot,
+                                subscription=subscription,
+                            )
+                        )
                     format_results[fmt] = ok
                     sent_any = ok or sent_any
                 except Exception as e:
@@ -160,70 +224,9 @@ class ReportDispatcher:
                         break
 
         if sent_any:
-            logger.info(f"[{trace_id}] 群 {group_id} 的报告分发完成，至少一种格式发送成功")
+            logger.info(f"[{trace_id}] 群 {group_id} 的{log_prefix}分发完成，至少一种格式发送成功")
         else:
-            logger.error(f"[{trace_id}] 群 {group_id} 的报告分发失败，未发送任何报告")
-        return sent_any
-
-    async def dispatch_to_subscription(
-        self,
-        subscription: object,
-        group_id: str,
-        analysis_result: dict[str, Any],
-        platform_id: str | None = None,
-    ) -> bool:
-        """定时路径：通过 gs_subscribe 订阅目标发送。"""
-        self._bot = None
-        self._subscription = subscription
-        trace_id = TraceContext.get()
-        trace_ctx = TraceContext.current()
-        output_formats = self.config_manager.get_output_format()
-        if isinstance(output_formats, str):
-            output_formats = [output_formats]
-
-        logger.info(f"[{trace_id}] 正在分发群 {group_id} 的订阅报告 (格式: {', '.join(output_formats)})")
-        dispatch_map = {
-            "image": self._dispatch_image,
-            "html": self._dispatch_html,
-            "text": self._dispatch_text,
-        }
-        selected_template = self._resolve_template_theme()
-        sent_any = False
-        for fmt in output_formats:
-            handler = dispatch_map.get(fmt)
-            if not handler:
-                logger.warning(f"[{trace_id}] 不支持的报告格式: {fmt}")
-                continue
-            try:
-                if fmt in {"image", "html"}:
-                    ok = bool(
-                        await handler(
-                            group_id,
-                            analysis_result,
-                            platform_id,
-                            template_theme=selected_template,
-                        )
-                    )
-                else:
-                    ok = bool(await handler(group_id, analysis_result, platform_id))
-                sent_any = ok or sent_any
-            except Exception as e:
-                logger.error(
-                    f"[{trace_id}] 群 {group_id} 的 {fmt} 订阅报告发送异常: {e}",
-                    exc_info=True,
-                )
-        if trace_ctx:
-            for s in reversed(trace_ctx._spans):
-                if s.get("stage_name") == "DISPATCH_REPORT":
-                    s.setdefault("payload", {}).update(
-                        {
-                            "platform": platform_id or "auto",
-                            "formats": output_formats,
-                            "success": sent_any,
-                            "group_id": group_id,
-                        }
-                    )
-                    break
+            logger.error(f"[{trace_id}] 群 {group_id} 的{log_prefix}分发失败，未发送任何报告")
         return sent_any
 
     def _resolve_template_theme(self) -> str:
@@ -241,13 +244,22 @@ class ReportDispatcher:
         analysis_result: dict[str, Any],
         platform_id: str | None,
         template_theme: str | None = None,
+        *,
+        bot: object | None = None,
+        subscription: object | None = None,
     ) -> bool:
         trace_id = TraceContext.get()
         trace_ctx = TraceContext.current()
         # 1. 检查渲染函数
         if not self._html_render_func:
             logger.warning(f"[{trace_id}] 未设置 HTML 渲染函数，回退到文本模式。")
-            return await self._dispatch_text(group_id, analysis_result, platform_id)
+            return await self._dispatch_text(
+                group_id,
+                analysis_result,
+                platform_id,
+                bot=bot,
+                subscription=subscription,
+            )
 
         # 2. 生成图片
         image_url = None
@@ -344,7 +356,12 @@ class ReportDispatcher:
 
             caption = TraceContext.make_report_caption() if self.config_manager.get_show_report_caption() else ""
             try:
-                sent = await self._send_image(image_url, caption)
+                sent = await self._send_image(
+                    image_url,
+                    caption,
+                    bot=bot,
+                    subscription=subscription,
+                )
             except Exception as e:
                 logger.error(f"[{trace_id}] 图片报告发送异常: {e}", exc_info=True)
 
@@ -364,7 +381,13 @@ class ReportDispatcher:
 
         # 6. 最终回退：如果图片发送失败（包括生成失败或发送接口报错），直接尝试发送文本报告
         logger.warning(f"[{trace_id}] Image dispatch failed, falling back to text report.")
-        return await self._dispatch_text(group_id, analysis_result, platform_id)
+        return await self._dispatch_text(
+            group_id,
+            analysis_result,
+            platform_id,
+            bot=bot,
+            subscription=subscription,
+        )
 
     async def _dispatch_html(
         self,
@@ -372,6 +395,9 @@ class ReportDispatcher:
         analysis_result: dict[str, Any],
         platform_id: str | None,
         template_theme: str | None = None,
+        *,
+        bot: object | None = None,
+        subscription: object | None = None,
     ) -> bool:
         trace_id = TraceContext.get()
         trace_ctx = TraceContext.current()
@@ -464,7 +490,11 @@ class ReportDispatcher:
                     encoded_url_path = quote(url_path.lstrip("/"), safe="/")
                     report_url = f"{base_url.rstrip('/')}/{encoded_url_path}"
 
-                    sent = await self._send_text(f"📊 今日群聊分析报告已生成：\n{report_url}")
+                    sent = await self._send_text(
+                        f"📊 今日群聊分析报告已生成：\n{report_url}",
+                        bot=bot,
+                        subscription=subscription,
+                    )
 
                     if sent:
                         return True
@@ -480,7 +510,12 @@ class ReportDispatcher:
                 else ""
             )
 
-            sent = await self._send_file(html_path, caption)
+            sent = await self._send_file(
+                html_path,
+                caption,
+                bot=bot,
+                subscription=subscription,
+            )
             if trace_ctx:
                 for s in reversed(trace_ctx._spans):
                     if s.get("stage_name") == "DISPATCH_REPORT":
@@ -495,9 +530,23 @@ class ReportDispatcher:
                 return True
 
         logger.warning(f"[{trace_id}] HTML dispatch failed, falling back to text report.")
-        return await self._dispatch_text(group_id, analysis_result, platform_id)
+        return await self._dispatch_text(
+            group_id,
+            analysis_result,
+            platform_id,
+            bot=bot,
+            subscription=subscription,
+        )
 
-    async def _dispatch_text(self, group_id: str, analysis_result: dict[str, Any], platform_id: str | None) -> bool:
+    async def _dispatch_text(
+        self,
+        group_id: str,
+        analysis_result: dict[str, Any],
+        platform_id: str | None,
+        *,
+        bot: object | None = None,
+        subscription: object | None = None,
+    ) -> bool:
         """分发文本报告"""
         logger.info(f"[分发器] 正在向群组 {group_id} 分发文本报告")
         is_qq_official = self._is_qq_official(platform_id)
@@ -512,7 +561,11 @@ class ReportDispatcher:
             text_report = self.report_generator.generate_text_report(analysis_result)
         logger.info(f"[分发器] 正在发送文本报告。群: {group_id}")
         try:
-            return await self._send_text(text_report)
+            return await self._send_text(
+                text_report,
+                bot=bot,
+                subscription=subscription,
+            )
         except Exception as e:
             logger.error(f"[分发器] 发送文本报告最终失败。群: {group_id}, 错误: {e}")
             return False
