@@ -66,12 +66,30 @@ def set_config(key: str, value: object) -> bool:
     return bool(DailyConfig.set_config(key, value))  # type: ignore[arg-type]
 
 
+def _plain_value(field: GSC) -> object:
+    """把配置字段转成可 JSON 序列化的纯数据。"""
+    if isinstance(field, GsDivider):
+        return None
+    if isinstance(field, GsRepeatGroupConfig):
+        rows: list[dict[str, object]] = []
+        for row in field.data:
+            rows.append(
+                {
+                    name: _plain_value(sub_field)
+                    for name, sub_field in row.items()
+                    if not isinstance(sub_field, GsDivider)
+                }
+            )
+        return rows
+    return field.data
+
+
 def config_snapshot() -> dict[str, object]:
     snapshot: dict[str, object] = {}
     for key, field in DailyConfig.config.items():
         if isinstance(field, GsDivider):
             continue
-        snapshot[key] = field.data
+        snapshot[key] = _plain_value(field)
     return snapshot
 
 

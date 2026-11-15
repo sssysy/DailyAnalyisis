@@ -116,14 +116,18 @@ class ConfigManager:
 
     @classmethod
     def _get_schema_fingerprint(cls) -> str:
-        """计算扁平配置结构指纹，忽略描述等纯界面字段。"""
-        shape = {}
+        """计算扁平配置结构指纹，只包含结构与默认值，不包含用户当前值。"""
+        from .daily_config import _plain_value
+        from .config_default import CONFIG_DEFAULT
+
+        shape: dict[str, object] = {}
         for key, field in cls._config_fields().items():
             if isinstance(field, GsDivider):
                 continue
+            default_field = CONFIG_DEFAULT.get(key)
             shape[key] = {
                 "type": type(field).__name__,
-                "default": getattr(field, "data", None),
+                "default": _plain_value(default_field) if default_field is not None else None,
             }
         serialized_shape = json.dumps(
             shape,
