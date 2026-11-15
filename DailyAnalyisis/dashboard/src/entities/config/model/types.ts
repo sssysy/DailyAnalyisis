@@ -41,6 +41,6 @@ export interface SchemaGroupItem {
 export type PluginSchema = Record<string, SchemaGroupItem>;
 
 export interface PluginConfigData {
-  config: Record<string, Record<string, unknown>>;
+  config: Record<string, unknown>;
   schema: PluginSchema;
 }

@@ -5,9 +5,9 @@ from gsuid_core.bot import Bot
 from gsuid_core.models import Event
 from gsuid_core.server import on_core_start, on_core_shutdown
 
-from . import webui_static as webui_static
-from .help import register_help_entry
 from .runtime import runtime
+from .daily_help import register_help_entry
+from .daily_webui import webui_static as webui_static
 
 Plugins(
     name="DailyAnalyisis",

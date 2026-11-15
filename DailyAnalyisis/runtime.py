@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-import inspect
+from collections.abc import Callable, Awaitable
 
 from gsuid_core.bot import Bot
 from gsuid_core.logger import logger
 from gsuid_core.models import Event
 
 from .plugin import GroupDailyAnalysis
-from .event_bridge import GsCoreMessageEvent, send_plugin_result
-from .plugin_config import gsconfig, load_config
-from .gscore_runtime import PluginContext
+from .daily_config import DailyConfig
+from .daily_ai.context import PluginContext
 
 
 class PluginRuntime:
@@ -19,11 +18,10 @@ class PluginRuntime:
     async def initialize(self) -> None:
         if self.plugin is not None:
             return
-        if not gsconfig.get_config("Enabled").data:
+        if not DailyConfig.get_config("Enabled").data:
             logger.info("DailyAnalyisis is disabled by configuration")
             return
-        config = load_config()
-        plugin = GroupDailyAnalysis(PluginContext(config), config)
+        plugin = GroupDailyAnalysis(PluginContext())
         self.plugin = plugin
         await plugin.initialize()
 
@@ -40,26 +38,23 @@ class PluginRuntime:
             return
         await self.plugin.bot_manager.archive_gscore_event(bot, event)
         if self.plugin.auto_scheduler:
-            plugin_event = GsCoreMessageEvent(bot, event)
-            await self.plugin.auto_scheduler.record_incremental_message(plugin_event)
+            await self.plugin.auto_scheduler.record_incremental_message(event)
 
-    async def invoke(self, method_name: str, bot: Bot, event: Event, *args) -> None:
+    async def invoke(
+        self,
+        method_name: str,
+        bot: Bot,
+        event: Event,
+        *args: object,
+    ) -> None:
         if self.plugin is None:
             await self.initialize()
         if self.plugin is None:
             await bot.send("❌ DailyAnalyisis 插件当前已禁用")
             return
-        plugin_event = GsCoreMessageEvent(bot, event)
-        self.plugin.bot_manager.update_from_event(plugin_event)
-        method = getattr(self.plugin, method_name)
-        result = method(plugin_event, *args)
-        if inspect.isasyncgen(result):
-            async for item in result:
-                await send_plugin_result(bot, item)
-        else:
-            value = await result
-            if value is not None:
-                await send_plugin_result(bot, value)
+        self.plugin.bot_manager.update_from_event(bot, event)
+        handler: Callable[..., Awaitable[None]] = getattr(self.plugin, method_name)
+        await handler(bot, event, *args)
 
 
 runtime = PluginRuntime()

@@ -94,7 +94,7 @@ export const ConfigPage: React.FC<ConfigPageProps> = ({ viewModel }) => {
               type="secondary"
               style={{ margin: "4px 0 0 0", fontSize: 12 }}
             >
-              基于最新版 <code>_conf_schema.json</code> 动态生成，升级新增字段会自动显示。修改后请点击右上角保存。
+              配置由 GsCore StringConfig 定义，保存后立即生效；修改定时时间需重载插件。
             </Paragraph>
           </div>
 
@@ -344,8 +344,8 @@ export const ConfigPage: React.FC<ConfigPageProps> = ({ viewModel }) => {
                       field.schema.type === "list" ||
                       field.schema.type === "text" ||
                       field.schema.type === "file" ||
-                      field.key.includes("prompt") ||
-                      field.key.includes("template") ||
+                      field.key.toLowerCase().includes("prompt") ||
+                      field.key.toLowerCase().includes("template") ||
                       field.key.toLowerCase().includes("provider") ||
                       field.key.toLowerCase().includes("persona") ||
                       field.schema._special === "select_persona" ||
@@ -366,7 +366,7 @@ export const ConfigPage: React.FC<ConfigPageProps> = ({ viewModel }) => {
                           providers={providers}
                           personas={personas}
                           onChange={(newVal) =>
-                            handleFieldChange(activeCategory, field.key, newVal)
+                            handleFieldChange(field.key, newVal)
                           }
                         />
                       </Col>

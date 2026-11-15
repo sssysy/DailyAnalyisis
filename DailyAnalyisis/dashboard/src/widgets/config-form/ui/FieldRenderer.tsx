@@ -67,6 +67,7 @@ export const FieldRenderer: React.FC<FieldRendererProps> = ({
   const type = fieldSchema.type;
   const options = fieldSchema.options;
   const defaultValue = fieldSchema.default;
+  const normalizedKey = fieldKey.toLowerCase();
 
   if (type === "string" && fieldSchema.secret) {
     const currentVal = typeof value === "string" ? value : "";
@@ -251,7 +252,11 @@ export const FieldRenderer: React.FC<FieldRendererProps> = ({
     }
 
     // 5. 纯文本 / 提示词模板 (text 或 multiline)
-    if (type === "text" || (type === "string" && (fieldKey.includes("template") || fieldKey.includes("prompt")))) {
+    if (
+      type === "text" ||
+      (type === "string" &&
+        (normalizedKey.includes("template") || normalizedKey.includes("prompt")))
+    ) {
       const currentVal =
         typeof value === "string"
           ? value
@@ -604,10 +609,10 @@ export const FieldRenderer: React.FC<FieldRendererProps> = ({
           allowClear
           style={{
             fontFamily:
-              fieldKey.includes("id") ||
-              fieldKey.includes("key") ||
-              fieldKey.includes("url") ||
-              fieldKey.includes("path")
+              normalizedKey.includes("id") ||
+              normalizedKey.includes("key") ||
+              normalizedKey.includes("url") ||
+              normalizedKey.includes("path")
                 ? SANS_MONO_FONT
                 : undefined,
           }}

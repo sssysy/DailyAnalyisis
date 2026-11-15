@@ -14,8 +14,8 @@ export function useConfigViewModel(onConfigSaved?: () => void) {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [schema, setSchema] = useState<PluginSchema>({});
-  const [originalConfig, setOriginalConfig] = useState<Record<string, Record<string, unknown>>>({});
-  const [formData, setFormData] = useState<Record<string, Record<string, unknown>>>({});
+  const [originalConfig, setOriginalConfig] = useState<Record<string, unknown>>({});
+  const [formData, setFormData] = useState<Record<string, unknown>>({});
   const [providers, setProviders] = useState<AvailableProvider[]>([]);
   const [personas, setPersonas] = useState<AvailablePersona[]>([]);
   const [activeCategory, setActiveCategory] = useState<string>("basic");
@@ -65,17 +65,12 @@ export function useConfigViewModel(onConfigSaved?: () => void) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const handleFieldChange = (groupKey: string, fieldKey: string, value: unknown) => {
+  const handleFieldChange = (fieldKey: string, value: unknown) => {
     setFormData((prev) => {
-      const next = { ...prev };
-      if (!next[groupKey]) {
-        next[groupKey] = {};
-      }
-      next[groupKey] = {
-        ...next[groupKey],
+      return {
+        ...prev,
         [fieldKey]: value,
       };
-      return next;
     });
   };
 
@@ -156,8 +151,8 @@ export function useConfigViewModel(onConfigSaved?: () => void) {
       .map(([fieldKey, item]) => ({
         key: fieldKey,
         schema: item,
-        value: formData[activeCategory]?.[fieldKey] !== undefined
-          ? formData[activeCategory][fieldKey]
+        value: formData[fieldKey] !== undefined
+          ? formData[fieldKey]
           : item.default,
       }));
   }, [schema, activeCategory, formData, searchQuery]);

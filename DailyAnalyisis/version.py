@@ -1,0 +1,1 @@
+PLUGIN_VERSION = "5.0.17"
